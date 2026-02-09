@@ -1,0 +1,303 @@
+<?php
+session_start();
+$db_file = 'database.json';
+date_default_timezone_set('Asia/Dhaka');
+
+// ডাটাবেস হ্যান্ডেলিং
+if (!file_exists($db_file)) {
+    $initial_data = [
+        'users' => [
+            'admin' => ['password' => 'admin123', 'balance' => 0, 'role' => 'admin', 'package' => 'None', 'total_dep' => 0, 'total_wid' => 0, 'upline' => '', 'income_date' => date('Y-m-d')]
+        ],
+        'deposits' => [],
+        'withdraws' => [],
+        'notice' => 'আমাদের সাইটে স্বাগতম! রেফার করুন এবং ৩ জেনারেশন কমিশন পান।'
+    ];
+    file_put_contents($db_file, json_encode($initial_data));
+}
+$db = json_decode(file_get_contents($db_file), true);
+
+function save_db($data) { global $db_file; file_put_contents($db_file, json_encode($data)); }
+
+$msg = ""; $error = "";
+$p = isset($_GET['p']) ? $_GET['p'] : 'home';
+
+// সাইনআপ (রেফার ক্যাচিং)
+if (isset($_POST['signup'])) {
+    $u = $_POST['username']; $p_word = $_POST['password']; $ref = $_POST['ref_by'];
+    if (!isset($db['users'][$u])) {
+        $db['users'][$u] = [
+            'password' => $p_word, 'balance' => 0, 'role' => 'user', 'package' => 'None', 
+            'total_dep' => 0, 'total_wid' => 0, 'upline' => $ref, 'income_date' => date('Y-m-d')
+        ];
+        save_db($db);
+        $msg = "রেজিস্ট্রেশন সফল! লগইন করুন।";
+    } else { $error = "এই নামে অলরেডি অ্যাকাউন্ট আছে!"; }
+}
+
+// লগইন
+if (isset($_POST['login'])) {
+    $u = $_POST['username']; $pw = $_POST['password'];
+    if (isset($db['users'][$u]) && $db['users'][$u]['password'] == $pw) {
+        $_SESSION['user'] = $u;
+        $_SESSION['role'] = $db['users'][$u]['role'];
+    } else { $error = "ভুল তথ্য!"; }
+}
+
+if (isset($_GET['logout'])) { session_destroy(); header("Location: ?"); exit; }
+
+// ডেইলি ইনকাম অটোমেটিক (রাত ১২টার পর)
+if (isset($_SESSION['user']) && $_SESSION['role'] == 'user') {
+    $u = $_SESSION['user']; $today = date('Y-m-d');
+    if ($today > $db['users'][$u]['income_date'] && $db['users'][$u]['package'] != 'None') {
+        $pkg = $db['users'][$u]['package'];
+        $daily = ($pkg == "500 PKG") ? 120 : (($pkg == "1000 PKG") ? 240 : 510);
+        $db['users'][$u]['balance'] += $daily;
+        $db['users'][$u]['income_date'] = $today;
+        save_db($db);
+    }
+}
+
+// অ্যাডমিন অ্যাকশন: ডিপোজিট অ্যাপ্রুভ (৩ জেনারেশন কমিশনসহ)
+if (isset($_GET['approve_dep']) && $_SESSION['role'] == 'admin') {
+    $id = $_GET['approve_dep'];
+    foreach ($db['deposits'] as &$d) {
+        if ($d['id'] == $id && $d['status'] == 'pending') {
+            $d['status'] = 'approved';
+            $u_name = $d['user']; $amt = $d['amount'];
+            $db['users'][$u_name]['balance'] += $amt;
+            $db['users'][$u_name]['total_dep'] += $amt;
+            
+            // ৩ জেনারেশন কমিশন ডিস্ট্রিবিউশন
+            $up1 = $db['users'][$u_name]['upline'] ?? '';
+            if(!empty($up1) && isset($db['users'][$up1])){
+                $db['users'][$up1]['balance'] += ($amt * 0.10); // ১০%
+                $up2 = $db['users'][$up1]['upline'] ?? '';
+                if(!empty($up2) && isset($db['users'][$up2])){
+                    $db['users'][$up2]['balance'] += ($amt * 0.05); // ৫%
+                    $up3 = $db['users'][$up2]['upline'] ?? '';
+                    if(!empty($up3) && isset($db['users'][$up3])){
+                        $db['users'][$up3]['balance'] += ($amt * 0.02); // ২%
+                    }
+                }
+            }
+            save_db($db); break;
+        }
+    }
+}
+
+// অ্যাডমিন অ্যাকশন: উইথড্র অ্যাপ্রুভ
+if (isset($_GET['approve_wid']) && $_SESSION['role'] == 'admin') {
+    $id = $_GET['approve_wid'];
+    foreach ($db['withdraws'] as &$w) {
+        if ($w['id'] == $id && $w['status'] == 'pending') { $w['status'] = 'paid'; save_db($db); break; }
+    }
+}
+
+// অ্যাডমিন অ্যাকশন: নোটিশ আপডেট
+if (isset($_POST['update_notice']) && $_SESSION['role'] == 'admin') {
+    $db['notice'] = $_POST['notice_text'];
+    save_db($db); $msg = "নোটিশ আপডেট হয়েছে!";
+}
+
+// ইউজার ফর্ম রিকোয়েস্ট
+if(isset($_POST['req_dep'])){ $db['deposits'][]=['user'=>$_SESSION['user'],'amount'=>$_POST['amount'],'trnx'=>$_POST['trnx'],'status'=>'pending','id'=>time()]; save_db($db); $msg="ডিপোজিট সফল!"; }
+if(isset($_POST['req_wid'])){ 
+    $u=$_SESSION['user']; $a=$_POST['amount'];
+    if($db['users'][$u]['balance']>=$a){
+        $db['users'][$u]['balance']-=$a; $db['users'][$u]['total_wid']+=$a;
+        $db['withdraws'][]=['user'=>$u,'amount'=>$a,'phone'=>$_POST['phone'],'status'=>'pending','id'=>time()];
+        save_db($db); $msg="উইথড্র রিকোয়েস্ট পাঠানো হয়েছে!";
+    } else { $error="ব্যালেন্স নেই!"; }
+}
+if (isset($_POST['buy_pkg'])) {
+    $p_price = $_POST['price']; $u = $_SESSION['user'];
+    if ($db['users'][$u]['balance'] >= $p_price) {
+        $db['users'][$u]['balance'] -= $p_price;
+        $db['users'][$u]['package'] = $_POST['pkg_name'];
+        save_db($db); $msg = "প্যাকেজ একটিভ!";
+    } else { $error = "পর্যাপ্ত টাকা নেই!"; }
+}
+?>
+
+<!DOCTYPE html>
+<html lang="bn">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Online Income BD - Pro</title>
+    <style>
+        :root { --main: #1a1a2e; --accent: #e94560; --dark: #0f0f1b; --blue: #007bff; }
+        body { font-family: 'Segoe UI', sans-serif; background: var(--dark); color: #fff; margin: 0; padding-bottom: 80px; }
+        .header { background: var(--main); padding: 15px; text-align: center; border-bottom: 2px solid var(--accent); position: sticky; top:0; z-index:100; }
+        .container { padding: 15px; }
+        .card { background: var(--main); padding: 15px; border-radius: 12px; margin-bottom: 15px; border: 1px solid #333; }
+        .stat-box { background: #16213e; padding: 15px; border-radius: 8px; text-align: center; border-bottom: 3px solid var(--accent); }
+        .notice-board { background: rgba(233, 69, 96, 0.1); border: 1px dashed var(--accent); color: var(--accent); padding: 10px; border-radius: 8px; margin-bottom: 15px; font-size: 14px; }
+        input, button, textarea { width: 100%; padding: 12px; margin: 8px 0; border-radius: 8px; border: none; box-sizing: border-box; }
+        button { background: var(--accent); color: #fff; font-weight: bold; cursor: pointer; }
+        .navbar { position: fixed; bottom: 0; width: 100%; background: var(--main); display: flex; justify-content: space-around; padding: 12px 0; border-top: 1px solid var(--accent); z-index:1000; }
+        .navbar a { color: #fff; text-decoration: none; font-size: 11px; text-align: center; opacity: 0.7; }
+        .navbar a.active { opacity: 1; color: var(--accent); }
+        .mySlides { display: none; width: 100%; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.5); }
+        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+        table { width: 100%; font-size: 12px; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 10px; border: 1px solid #333; text-align: left; }
+    </style>
+</head>
+<body>
+
+<?php if (!isset($_SESSION['user'])): ?>
+    <div class="container" style="text-align: center; margin-top: 50px;">
+        <h2 style="color: var(--accent);">Online Income BD</h2>
+        <?php if($msg) echo "<p style='color:green'>$msg</p>"; ?>
+        <?php if($error) echo "<p style='color:red'>$error</p>"; ?>
+        <form method="POST">
+            <input type="text" name="username" placeholder="ইউজারনেম" required>
+            <input type="password" name="password" placeholder="পাসওয়ার্ড" required>
+            <input type="text" name="ref_by" placeholder="রেফার কোড" value="<?php echo $_GET['ref'] ?? ''; ?>">
+            <button type="submit" name="login">লগইন</button>
+            <button type="submit" name="signup" style="background:#333;">নতুন অ্যাকাউন্ট</button>
+        </form>
+    </div>
+<?php else: ?>
+
+    <div class="header">
+        <h3><?php echo ($_SESSION['role'] == 'admin') ? "এডমিন কন্ট্রোল" : "অনলাইন ইনকাম বাংলাদেশ"; ?></h3>
+    </div>
+
+    <div class="container">
+        <?php if($msg) echo "<div style='background:green; padding:10px; border-radius:5px; margin-bottom:10px;'>$msg</div>"; ?>
+        <?php if($error) echo "<div style='background:red; padding:10px; border-radius:5px; margin-bottom:10px;'>$error</div>"; ?>
+
+        <?php if ($_SESSION['role'] == 'admin'): ?>
+            <div class="card">
+                <h4>নোটিশ বোর্ড আপডেট</h4>
+                <form method="POST">
+                    <textarea name="notice_text" rows="2"><?php echo $db['notice']; ?></textarea>
+                    <button type="submit" name="update_notice">আপডেট করুন</button>
+                </form>
+            </div>
+
+            <div class="grid">
+                <div class="stat-box"><h4><?php echo count($db['users'])-1; ?></h4><small>ইউজার</small></div>
+                <div class="stat-box"><h4><?php 
+                    $t_dep = 0; foreach($db['deposits'] as $d) if($d['status']=='approved') $t_dep+=$d['amount']; echo $t_dep; 
+                ?> ৳</h4><small>ডিপোজিট</small></div>
+            </div>
+
+            <h4 style="margin-top:20px;">পেন্ডিং ডিপোজিট</h4>
+            <?php foreach($db['deposits'] as $d): if($d['status']=='pending'): ?>
+                <div class="card">
+                    <b><?php echo $d['user']; ?>: <?php echo $d['amount']; ?>৳</b> (Trnx: <?php echo $d['trnx']; ?>)<br>
+                    <a href="?approve_dep=<?php echo $d['id']; ?>"><button style="width:auto; padding:5px 15px; margin-top:5px;">Approve</button></a>
+                </div>
+            <?php endif; endforeach; ?>
+
+            <h4 style="margin-top:20px;">পেন্ডিং উইথড্র</h4>
+            <?php foreach($db['withdraws'] as $w): if($w['status']=='pending'): ?>
+                <div class="card">
+                    <b><?php echo $w['user']; ?>: <?php echo $w['amount']; ?>৳</b> (<?php echo $w['phone']; ?>)<br>
+                    <a href="?approve_wid=<?php echo $w['id']; ?>"><button style="width:auto; padding:5px 15px; background:orange;">Paid Done</button></a>
+                </div>
+            <?php endif; endforeach; ?>
+            
+            <a href="?logout=1"><button style="background:#555;">লগআউট</button></a>
+
+        <?php else: ?>
+            <?php if ($p == 'home'): ?>
+                <div style="margin-bottom:15px;">
+                    <img src="banner1.png" class="mySlides">
+                    <img src="banner2.png" class="mySlides">
+                    <img src="banner3.png" class="mySlides">
+                </div>
+
+                <div class="notice-board"><marquee>📢 <?php echo $db['notice']; ?></marquee></div>
+
+                <div class="card" style="text-align:center;">
+                    <h2 style="color:var(--accent);"><?php echo $db['users'][$_SESSION['user']]['balance']; ?> ৳</h2>
+                    <p style="margin-top:0; opacity:0.8;">ব্যালেন্স</p>
+                    <div class="grid">
+                        <button onclick="location.href='?p=dep'" style="background:var(--blue);">ডিপোজিট</button>
+                        <button onclick="location.href='?p=wid'" style="background:orange;">উত্তোলন</button>
+                    </div>
+                    <button onclick="window.open('https://t.me/8801825801918')" style="background:#0088cc; margin-top:10px;">Official Telegram</button>
+                </div>
+
+            <?php elseif ($p == 'vip'): ?>
+                <h3 style="text-align:center;">ভিআইপি প্যাকেজ</h3>
+                <div class="card"><h4>৫০০ ৳ | ১২০ ৳ ডেইলি</h4><form method="POST"><input type="hidden" name="pkg_name" value="500 PKG"><input type="hidden" name="price" value="500"><button type="submit" name="buy_pkg">একটিভ করুন</button></form></div>
+                <div class="card"><h4>১০০০ ৳ | ২৪০ ৳ ডেইলি</h4><form method="POST"><input type="hidden" name="pkg_name" value="1000 PKG"><input type="hidden" name="price" value="1000"><button type="submit" name="buy_pkg">একটিভ করুন</button></form></div>
+                <div class="card"><h4>২০০০ ৳ | ৫১০ ৳ ডেইলি</h4><form method="POST"><input type="hidden" name="pkg_name" value="2000 PKG"><input type="hidden" name="price" value="2000"><button type="submit" name="buy_pkg">একটিভ করুন</button></form></div>
+
+            <?php elseif ($p == 'team'): 
+                $ref_url = (isset($_SERVER['HTTPS']) ? "https" : "http") . "://$_SERVER[HTTP_HOST]$_SERVER[PHP_SELF]?ref=" . $_SESSION['user']; ?>
+                <h3 style="text-align:center;">টিম কমিশন</h3>
+                <div class="card">
+                    <p>আপনার রেফার লিঙ্ক:</p>
+                    <input type="text" id="refL" value="<?php echo $ref_url; ?>" readonly style="background:#111; color:#fff; border:1px solid #444;">
+                    <button onclick="copyR()">লিঙ্ক কপি করুন</button>
+                    <div style="margin-top:15px; font-size:13px; opacity:0.8;">
+                        <p>১ম জেনারেশন: ১০% কমিশন</p>
+                        <p>২য় জেনারেশন: ৫% কমিশন</p>
+                        <p>৩য় জেনারেশন: ২% কমিশন</p>
+                    </div>
+                </div>
+
+            <?php elseif ($p == 'me'): ?>
+                <div class="card">
+                    <h3 style="margin:0;"><?php echo $_SESSION['user']; ?></h3>
+                    <p>মোট ইনভেস্ট: <?php echo $db['users'][$_SESSION['user']]['total_dep']; ?> ৳</p>
+                    <p>মোট উইথড্র: <?php echo $db['users'][$_SESSION['user']]['total_wid']; ?> ৳</p>
+                    <p>প্যাকেজ: <b><?php echo $db['users'][$_SESSION['user']]['package']; ?></b></p>
+                </div>
+                <button onclick="alert('হিস্ট্রি খালি')" style="background:#333;">ডিপোজিট হিস্ট্রি</button>
+                <button onclick="alert('হিস্ট্রি খালি')" style="background:#333;">উত্তোলন হিস্ট্রি</button>
+                <a href="?logout=1"><button style="background:red; margin-top:10px;">লগআউট</button></a>
+
+            <?php elseif ($p == 'dep'): ?>
+                <div class="card">
+                    <h4>ডিপোজিট করুন (01825801918)</h4>
+                    <form method="POST">
+                        <input type="number" name="amount" placeholder="পরিমাণ" required>
+                        <input type="text" name="trnx" placeholder="Transaction ID" required>
+                        <button type="submit" name="req_dep">রিকোয়েস্ট পাঠান</button>
+                    </form>
+                </div>
+            <?php elseif ($p == 'wid'): ?>
+                <div class="card">
+                    <h4>উত্তোলন করুন</h4>
+                    <form method="POST">
+                        <input type="number" name="amount" placeholder="পরিমাণ" required>
+                        <input type="text" name="phone" placeholder="বিকাশ/নগদ নম্বর" required>
+                        <button type="submit" name="req_wid" style="background:orange;">উইথড্র পাঠান</button>
+                    </form>
+                </div>
+            <?php endif; ?>
+
+            <div class="navbar">
+                <a href="?p=home" class="<?php if($p=='home') echo 'active'; ?>">🏠<br>হোম</a>
+                <a href="?p=vip" class="<?php if($p=='vip') echo 'active'; ?>">💎<br>ভিআইপি</a>
+                <a href="?p=team" class="<?php if($p=='team') echo 'active'; ?>">👨‍👩‍👦<br>টিম</a>
+                <a href="?p=me" class="<?php if($p=='me') echo 'active'; ?>">👤<br>আমার</a>
+            </div>
+        <?php endif; ?>
+    </div>
+<?php endif; ?>
+
+<script>
+    let sI = 0;
+    function slides() {
+        let s = document.getElementsByClassName("mySlides");
+        if(s.length > 0){
+            for (let i = 0; i < s.length; i++) s[i].style.display = "none";
+            sI++; if (sI > s.length) sI = 1;
+            s[sI-1].style.display = "block";
+            setTimeout(slides, 3000);
+        }
+    }
+    slides();
+    function copyR(){ var c = document.getElementById("refL"); c.select(); document.execCommand("copy"); alert("লিঙ্ক কপি হয়েছে!"); }
+</script>
+</body>
+</html>
